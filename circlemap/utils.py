@@ -38,7 +38,19 @@ import re
 from numba import jit
 import math
 import datetime
+import pysam
+import pandas as pd
+import pybedtools as bt
+import logging
+from multiprocessing.pool import ThreadPool as Pool
 
+
+# 设置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 设置最大深度阈值
+MAX_DEPTH = 1000
 
 
 
@@ -1158,81 +1170,77 @@ def merge_fraction(chrom1,x1,x2,chrom2,y1,y2):
     return(pd.Series(chrom1 == chrom2) + pd.Series(two_overlap_one.clip(0)) + pd.Series(one_overlap_two.clip(0)))
 
 
-def iteration_merge(only_discordants,results,fraction,splits,score,sc_len,bam,af,insert,std,n_discordant):
-    """finction that merges the results of every iteration and filters the data by allele frequency"""
 
+def get_coverage(bam, contig, start, stop):
+    """使用pileup获取覆盖度，并处理高深度区域"""
+    total_depth = 0
+    positions = 0
+    for pileup in bam.pileup(contig, start, stop, truncate=True):
+        depth = len(pileup.pileups)
+        if depth > MAX_DEPTH:
+            logger.warning(f"High depth detected at {contig}:{pileup.pos}. Using max depth.")
+            total_depth += MAX_DEPTH
+        else:
+            total_depth += depth
+        positions += 1
+    return total_depth / positions if positions > 0 else 0
+
+def process_interval(args):
+    interval, bam_file, splits, score, af, n_discordant = args
+    try:
+        bam = bam_file
+        contig, start, end = interval[0], int(interval[1]), int(interval[2])
+        split_reads = int(interval[4])
+        discordant_reads = int(interval[3])
+
+        if split_reads != 0:
+            if split_reads >= splits and float(interval[5]) > score:
+                start_cov = get_coverage(bam, contig, start, start + 1)
+                end_cov = get_coverage(bam, contig, end - 1, end)
+                circle_af = (split_reads * 2) / ((start_cov + end_cov + 0.01) / 2)
+                if circle_af >= af:
+                    return interval
+        else:
+            if discordant_reads >= n_discordant:
+                start_cov = get_coverage(bam, contig, start, start + 1)
+                end_cov = get_coverage(bam, contig, end - 1, end)
+                circle_af = discordant_reads / ((start_cov + end_cov + 0.01) / 2)
+                if circle_af >= af:
+                    return interval
+    except Exception as e:
+        logger.error(f"Error processing interval {interval}: {str(e)}")
+    finally:
+        bam.close()
+    return None
+
+def iteration_merge(only_discordants, results, fraction, splits, score, sc_len, bam_file, af, insert, std, n_discordant):
+    """Function that merges the results of every iteration and filters the data by allele frequency"""
     norm_fraction = 3
 
-    parsed_discordants = []
-    for interval in only_discordants:
-        interval.append(0)
-        parsed_discordants.append(interval)
-
-
+    parsed_discordants = [interval + [0] for interval in only_discordants]
     discordant_bed = bt.BedTool(parsed_discordants)
 
-
-
-
-
     unparsed_pd = pd.DataFrame.from_records(results,
-        columns=['chrom', 'start', 'end', 'read', 'iteration','score', 'discordants'])
+        columns=['chrom', 'start', 'end', 'read', 'iteration', 'score', 'discordants'])
 
-    unparsed_pd = unparsed_pd.sort_values(['iteration','chrom','start','end']).reset_index()
-
+    unparsed_pd = unparsed_pd.sort_values(['iteration', 'chrom', 'start', 'end']).reset_index()
 
     grouped = unparsed_pd.groupby(merge_fraction(unparsed_pd.iteration.shift(), unparsed_pd.start.shift(),
                                            unparsed_pd.end.shift(), unparsed_pd.iteration,
                                            unparsed_pd.start,
                                            unparsed_pd.end).lt(norm_fraction).cumsum()).agg(
-        {'chrom': 'first', 'start': 'min', 'end': 'max', 'discordants': 'max', 'read': 'sum','score':'sum'})
+        {'chrom': 'first', 'start': 'min', 'end': 'max', 'discordants': 'max', 'read': 'sum', 'score': 'sum'})
 
     bedtool_output = bt.BedTool.from_dataframe(grouped)
-
-
-
-
-
-
     allele_free = bedtool_output.cat(discordant_bed, postmerge=False)
-    write = []
+    args = [(interval, bam_file, splits, score, af, n_discordant) for interval in allele_free]
+    # 并行处理intervals
+    write = [process_interval(arg) for arg in args]
 
-    for interval in allele_free:
-        try:
-            if int(interval[4]) != 0:
-                if (int(interval[4])) >= splits and float(interval[5]) > score:
-                    start_cov = bam.count(contig=interval[0],
-                                                   start=int(interval[1]), stop=int(interval[1])+1
-                                                   ,read_callback='nofilter')
+    # 过滤掉None值（处理失败的intervals）
+    write = [w for w in write if w is not None]
 
-                    end_cov = bam.count(contig=interval[0],
-                                                 start=int(interval[2])-1, stop=int(interval[2])
-                                                 ,read_callback='nofilter')
-
-
-
-                    circle_af = ((int(interval[4]) * 2)) / ((start_cov+end_cov+0.01)/2)
-                    if circle_af >=af:
-                        write.append(interval)
-            else:
-                if int(interval[3]) >= n_discordant:
-                        start_cov = bam.count(contig=interval[0],start=int(interval[1]), stop=int(interval[1]) + 1,
-                                                   read_callback='nofilter')
-
-                        end_cov = bam.count(contig=interval[0],
-                                                 start=int(interval[2]) - 1, stop=int(interval[2]),
-                                                 read_callback='nofilter')
-
-                        circle_af = (int(interval[3])) / ((start_cov+end_cov+0.01)/2)
-
-                        if circle_af >= af:
-                            write.append(interval)
-        except BaseException as e:
-            print(e)
-            pass
-
-    return(bt.BedTool(write))
-
+    return bt.BedTool(write)
 
 
 

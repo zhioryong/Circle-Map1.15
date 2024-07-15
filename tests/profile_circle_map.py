@@ -4,10 +4,10 @@ from circlemap.realigner import realignment
 import os
 from tqdm import *
 
-input = "/home/iprada/faststorage/projects/6_aged_yeast/working_directory/aligned/BM3/sort_circle_qname_BM3.bam"
-qbam = "/home/iprada/faststorage/projects/6_aged_yeast/working_directory/aligned/BM3/qname_BM3.bam"
-sort_bam = "/home/iprada/faststorage/projects/6_aged_yeast/working_directory/aligned/BM3/sorted_BM3.bam"
-fasta = "/home/iprada/faststorage/reference_Data/Saccharomyces_cerevisiae/UCSC/sacCer3/Sequence/8_plasmids_genome/yeast_8_plasmids.fa"
+input = "/home/zzy/work/IGV/Circle-Map1.15/tutorial/sort_circular_read_candidates.bam"
+qbam = "/home/zzy/work/IGV/Circle-Map1.15/tutorial/qname_unknown_circle.bam"
+sort_bam = "/home/zzy/work/IGV/Circle-Map1.15/tutorial/sorted_unknown_circle.bam"
+fasta = "/home/zzy/work/IGV/Circle-Map1.15/tutorial/hg38-Ensembl.fa"
 
 splitted, sorted_bam, begin = start_realign(input,"profiling_output.bed", 1,3,1,500)
 
